@@ -741,6 +741,7 @@ export * from '#/features/todo/todoItem';
 export * from '#/features/todo/todoListReminder';
 export * from '#/features/todo/todoService';
 export * from '#/features/todo/tools/todo-list/todo-list';
+export * from '#/features/externalChannel/flag';
 import '#/features/todo/todoFeature';
 export * from '#/features/notify/flag';
 export * from '#/features/notify/notifyUserAvailability';

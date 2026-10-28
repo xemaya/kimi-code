@@ -127,6 +127,7 @@ import {
   SESSIONLESS_STARTUP_NOTICE,
   SHUTTING_DOWN_HINT,
 } from './constant/kimi-tui';
+import { INTERACTIVE_CHANNEL_FLAG } from './constant/interactive-channel';
 import { MEDIA_INGESTION_SUBMIT_WAIT_MS } from './constant/media';
 import { CHROME_GUTTER, DOCK_APPROVAL_ROWS } from './constant/rendering';
 import { MAX_TERMINAL_TITLE_LENGTH } from './constant/terminal';
@@ -134,6 +135,7 @@ import { AuthFlowController } from './controllers/auth-flow';
 import { BtwPanelController } from './controllers/btw-panel';
 import { ClipboardImageHintController } from './controllers/clipboard-image-hint';
 import { EditorKeyboardController } from './controllers/editor-keyboard';
+import { InteractiveChannelController } from './controllers/interactive-channel';
 import { ModelMigrationController } from './controllers/model-migration';
 import { ProgramStatusController } from './controllers/program-status';
 import { SessionEventHandler } from './controllers/session-event-handler';
@@ -332,6 +334,7 @@ interface SendMessageOptions {
    */
   readonly lease?: StagingLease;
   readonly occupiedRetry?: boolean;
+  readonly promptId?: string;
 }
 
 /** How long the one-shot "moved to background" footer hint stays visible. */
@@ -346,6 +349,8 @@ export class KimiTUI {
   private ensureSessionPromise: Promise<Session | undefined> | null = null;
   /** In-flight `/new` session replacement, shared by concurrent `/new` triggers. */
   private newSessionPromise: Promise<void> | null = null;
+  interactiveChannel?: InteractiveChannelController;
+  private readonly channelPath?: string;
   private readonly cacheHint = new CacheHintController(this);
   /** Staged prompt media lifecycle (daemon uploads + cache copies) — see StagingLeaseTracker. */
   private readonly staging: StagingLeaseTracker;
@@ -485,6 +490,7 @@ export class KimiTUI {
       },
     };
     this.options = tuiOptions;
+    this.channelPath = startupInput.cliOptions.channel;
     this.migrationPlan = startupInput.migrationPlan ?? null;
     this.migrateOnly = startupInput.migrateOnly ?? false;
     this.telemetryDisabled = startupInput.telemetryDisabled ?? false;
@@ -913,6 +919,7 @@ export class KimiTUI {
     // warning yellow at boot; `run-prompt`/`run-v2-print` print them to
     // stderr for non-interactive runs.
     void this.showConfigWarningsIfAny();
+    await this.interactiveChannel?.start();
     if (this.state.startupState === 'picker') {
       void this.bootstrapFromPicker();
       void this.backgroundRefreshPromise?.then(() => {
@@ -968,6 +975,12 @@ export class KimiTUI {
 
   private async init(): Promise<boolean> {
     setExperimentalFeatures(await this.harness.getExperimentalFeatures());
+    if (this.channelPath !== undefined) {
+      if (!isExperimentalFlagEnabled(INTERACTIVE_CHANNEL_FLAG)) {
+        throw new Error('--channel requires the tui_channel experimental feature (KIMI_CODE_EXPERIMENTAL_TUI_CHANNEL=1).');
+      }
+      this.interactiveChannel = new InteractiveChannelController(this, this.channelPath);
+    }
     this.sessionEventHandler.notifications.setEnabled(isExperimentalFlagEnabled('notify_user'));
     await this.authFlow.refreshAvailableModels();
     this.backgroundRefreshPromise = this.refreshProviderModelsInBackground();
@@ -1132,6 +1145,7 @@ export class KimiTUI {
     // SIGTERM during a network or MCP shutdown must not leave the user stuck in
     // raw mode with a hidden cursor.
     try {
+      await this.interactiveChannel?.close();
       await this.closeSession('shutting down');
       this.clearQueuedMessages();
       this.staging.releaseAll();
@@ -1468,6 +1482,17 @@ export class KimiTUI {
       this.sendQueuedMessage(session, item);
     }
     this.updateQueueDisplay();
+  }
+
+  async sendChannelInput(text: string, promptId: string): Promise<void> {
+    if (text.trim().length === 0) throw new TypeError('Channel prompt cannot be empty');
+    if (promptId.length === 0) throw new TypeError('Channel promptId cannot be empty');
+    if (this.state.appState.model.trim().length === 0) throw new Error(LLM_NOT_SET_MESSAGE);
+    const session = this.session ?? await this.ensureSession();
+    if (session === undefined) throw new Error(NO_ACTIVE_SESSION_MESSAGE);
+    this.sendMessage(session, text, { promptId });
+    this.updateQueueDisplay();
+    this.state.ui.requestRender();
   }
 
   async sendNormalUserInput(text: string, preExtracted?: ExtractionResult): Promise<void> {
@@ -1827,6 +1852,7 @@ export class KimiTUI {
     if (this.state.queuedMessages.length === 0) return undefined;
     const last = this.state.queuedMessages.at(-1)!;
     if (this.steeringQueuedMessages.has(last)) return undefined;
+    this.interactiveChannel?.handleDispatchError(last.promptId, new Error('Queued prompt was recalled'));
     this.state.queuedMessages = this.state.queuedMessages.slice(0, -1);
     // A recall restores the draft into the editor — it is not a discard:
     // consumes the retains only, keeping the staged daemon uploads alive
@@ -1889,6 +1915,7 @@ export class KimiTUI {
       mode,
       mediaSnapshots: options?.mediaSnapshots,
       inlineSkillActivations: options?.inlineSkillActivations,
+      promptId: options?.promptId,
     };
   }
 
@@ -2034,6 +2061,7 @@ export class KimiTUI {
         imageAttachmentIds: item.imageAttachmentIds,
         videoAttachmentIds: item.videoAttachmentIds,
         occupiedRetry: item.occupiedRetry,
+        promptId: item.promptId,
       });
     });
   }
@@ -2125,7 +2153,7 @@ export class KimiTUI {
             originalsDirForSession(session),
           )
         : input;
-    const goalActive = this.state.appState.goal?.status === 'active';
+    const goalActive = options?.promptId === undefined && this.state.appState.goal?.status === 'active';
     // The lease normally arrives pre-created by sendNormalUserInput (carrying
     // its exact-binding submission id). Queued dispatches and steer batches
     // arrive with raw ids instead: a prompt submission carrying staged
@@ -2147,7 +2175,7 @@ export class KimiTUI {
         'user',
         !goalActive && stagingIds.length > 0 ? randomUUID() : undefined,
       );
-    const submissionId = stagingLease?.submissionId;
+    const submissionId = options?.promptId ?? stagingLease?.submissionId;
     const resend = (): void => {
       this.state.queuedMessages.unshift({
         ...this.toQueuedMessage(input, options),
@@ -2157,6 +2185,7 @@ export class KimiTUI {
       this.drainQueueIfIdle();
     };
     const restoreInput = (): void => {
+      this.interactiveChannel?.handleDispatchError(options?.promptId, new Error('Prompt cancelled'));
       this.staging.releaseRecalled(stagingIds);
       this.restoreInputText(input);
     };
@@ -2208,6 +2237,7 @@ export class KimiTUI {
         this.staging.defer(stagingLease);
         return;
       }
+      this.interactiveChannel?.handleDispatchError(options?.promptId, error);
       this.failSessionRequest(`Failed to send: ${formatErrorMessage(error)}`);
     });
   }
@@ -2313,6 +2343,7 @@ export class KimiTUI {
     // new input; a non-steerable backlog (bash, slash-skill, inline-skill
     // bundle) cannot, and then this input queues behind it instead.
     if (
+      options?.promptId === undefined &&
       this.canSteerQueueIntoRunningTurn() &&
       this.state.queuedMessages.every(isSteerableQueuedMessage)
     ) {
@@ -2372,7 +2403,7 @@ export class KimiTUI {
       firstCompact === -1 ? this.state.queuedMessages.length : firstCompact,
     );
     const batch = manual
-      ? beforeBarrier.filter((message) => message.mode !== 'bash')
+      ? beforeBarrier.filter((message) => message.mode !== 'bash' && message.promptId === undefined)
       : beforeBarrier;
     if (batch.length === 0 || (!manual && !batch.every(isSteerableQueuedMessage))) return;
     const pending = [...batch];
@@ -2611,6 +2642,7 @@ export class KimiTUI {
 
   clearQueuedMessages(): void {
     const queued = this.state.queuedMessages;
+    for (const message of queued) this.interactiveChannel?.handleDispatchError(message.promptId, new Error('Queued prompt was cleared'));
     this.state.queuedMessages = [];
     this.staging.releaseQueued(queued.filter((message) => !this.steeringQueuedMessages.has(message)));
   }
@@ -2903,6 +2935,7 @@ export class KimiTUI {
     // before the engine's intake can read it.
     if (previous !== undefined) this.staging.releaseAll();
     this.session = session;
+    this.interactiveChannel?.attach(session);
     this.surveyController.seedUserTurnCount(initialUserTurnCount);
     this.harness.setTelemetryContext({ sessionId: session.id });
     this.registerSessionHandlers(session);
@@ -2979,6 +3012,7 @@ export class KimiTUI {
 
   private unloadCurrentSession(reason: string): Session | undefined {
     const previous = this.session;
+    this.interactiveChannel?.detach(previous);
     this.sessionEventUnsubscribe?.();
     this.sessionEventUnsubscribe = undefined;
     this.clearReverseRpcPanels();
@@ -4912,8 +4946,9 @@ export class KimiTUI {
   }
 }
 
-function isSteerableQueuedMessage(message: QueuedMessage): boolean {
+export function isSteerableQueuedMessage(message: QueuedMessage): boolean {
   return (
+    message.promptId === undefined &&
     message.inlineSkillActivations === undefined &&
     message.mode !== 'bash' &&
     message.mode !== 'compact'

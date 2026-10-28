@@ -96,6 +96,7 @@ import { createGoal as startGoalCommand } from '../commands/goal';
 export interface SessionEventHost {
   state: TUIState;
   session: Session | undefined;
+  readonly interactiveChannel?: { markReady(session: Session): void };
   aborted: boolean;
   sessionEventUnsubscribe: (() => void) | undefined;
   readonly streamingUI: StreamingUIController;
@@ -240,6 +241,7 @@ export class SessionEventHandler {
       }
       this.handleEvent(event, sendQueued);
     });
+    host.interactiveChannel?.markReady(session);
     void this.syncMcpServerStatusSnapshot(session);
   }
 

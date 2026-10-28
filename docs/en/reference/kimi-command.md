@@ -27,6 +27,7 @@ All flags are optional — run `kimi` directly to enter an interactive session:
 | `--agent <name>` | | Start a new session with the specified agent as the main Agent. Cannot be combined with `--session`/`--continue` |
 | `--agent-file <path>` | | Load a custom agent from a Markdown file for the new session and select it. Cannot be repeated or combined with `--agent`, `--session`, or `--continue` |
 | `--add-dir <dir>` | | Add an extra workspace directory for this session. Relative paths resolve against the current working directory. Can be repeated |
+| `--channel <path>` | | Expose the interactive TUI over a local Unix socket; requires the `tui_channel` experimental feature |
 
 `-r` / `--resume` is a hidden alias for `--session`; `--yes` and `--auto-approve` are hidden aliases for `--yolo` and are not shown in help output.
 
@@ -42,10 +43,29 @@ The following combinations are rejected at startup:
 - `--yolo` and `--auto` are mutually exclusive — the two permission modes cannot be combined
 - `--prompt` cannot be used with `--yolo`, `--auto`, or `--plan` — non-interactive mode uses `auto` permission by default
 - `--output-format` can only be used together with `--prompt`
+- `--channel` cannot be used with `--prompt`
 
 Nobody can review a plan in non-interactive mode, so `default_plan_mode` is not applied to new sessions. A resumed session that is already in Plan mode still runs and stays in Plan mode, but its plan cannot be approved in non-interactive mode: it waits for your review the next time you open the session with `kimi -r`.
 
 When resuming a session, you can override its saved permission or plan mode by adding `--auto`, `--yolo`, or `--plan`. For example, `kimi --continue --auto` resumes the latest session and switches it to Never Ask mode.
+
+### Interactive Channel (experimental)
+
+A local client can submit prompts to the native TUI over a Unix socket (a local IPC endpoint). This keeps the existing interactive Session, input queue, and approval panels in the TUI process; it does not start another runtime or expose a TCP port.
+
+```sh
+KIMI_CODE_EXPERIMENTAL_TUI_CHANNEL=1 kimi --session <session-id> --channel /tmp/example.sock
+```
+
+The listener starts only after the workspace trust check. It accepts one local client, uses a `0600` socket, and speaks NDJSON (one JSON object per line) with protocol version `1`:
+
+```json
+{"version":1,"type":"prompt","id":"cmd_example","text":"Return a short answer"}
+```
+
+The `ready` event carries `session_id`. The `prompt.accepted`, `prompt.started`, `assistant.delta`, `prompt.completed`, and `error` events use `request_id` to identify the request. Turn events also include `turn_id`, and only the matching request's output is returned. Client request IDs are namespaced internally so they cannot claim another client's turn.
+
+Input is plain prompt text, not slash commands, shell commands, or media. Permissions continue to appear in the native TUI. A new Session ID in `ready` means the user switched Sessions, so clients must stop using the previous identity. Unfinished work is not automatically replayed after a disconnect, and duplicate request IDs are rejected within the most recent 128 requests.
 
 ## Common Usage
 

@@ -27,6 +27,7 @@ kimi <subcommand> [options]
 | `--agent <name>` | | 以指定 Agent 作为 main agent 启动新会话。不能与 `--session`/`--continue` 同时使用 |
 | `--agent-file <path>` | | 从 Markdown 文件加载自定义 Agent 并为新会话选中它。不可重复传入，也不能与 `--agent`、`--session` 或 `--continue` 同时使用 |
 | `--add-dir <dir>` | | 为本次会话添加额外的工作目录。相对路径按当前工作目录解析。可重复传入 |
+| `--channel <path>` | | 通过本机 Unix Socket 开放原生 TUI 的交互通道；需要启用 `tui_channel` 实验特性 |
 
 `-r` / `--resume` 是 `--session` 的隐藏别名；`--yes` 和 `--auto-approve` 是 `--yolo` 的隐藏别名，在帮助信息中不显示。
 
@@ -42,10 +43,29 @@ kimi <subcommand> [options]
 - `--yolo` 和 `--auto` 互斥——两种权限模式互斥
 - `--prompt` 不能与 `--yolo`、`--auto` 或 `--plan` 同时使用——非交互模式固定使用 `auto` 权限
 - `--output-format` 只能与 `--prompt` 一起使用
+- `--channel` 不能与 `--prompt` 一起使用
 
 非交互模式下没人能审阅计划，所以新会话不应用 `default_plan_mode`。恢复已经处于 Plan 模式的会话时照常运行，会话仍在 Plan 模式中，但计划无法在非交互模式下批准，会等你下次用 `kimi -r` 打开会话时审阅。
 
 恢复会话时，可以通过 `--auto`、`--yolo` 或 `--plan` 覆盖原会话保存的权限或计划模式。例如，`kimi --continue --auto` 会恢复最近会话并切换到 "Never Ask" 模式。
+
+### 原生交互通道（实验特性）
+
+本地客户端可以通过 Unix Socket（本机进程间通信端点）向原生 TUI 提交提示词。现有会话、输入队列和审批面板都保留在同一个 TUI 进程中，不会启动另一个运行时，也不会开放 TCP 端口。
+
+```sh
+KIMI_CODE_EXPERIMENTAL_TUI_CHANNEL=1 kimi --session <session-id> --channel /tmp/example.sock
+```
+
+监听器只在目录信任检查通过后启动，只接受一个本地客户端，Socket 权限为 `0600`，使用版本为 `1` 的 NDJSON（逐行 JSON）协议：
+
+```json
+{"version":1,"type":"prompt","id":"cmd_example","text":"返回一个简短回答"}
+```
+
+`ready` 事件只携带 `session_id`。`prompt.accepted`、`prompt.started`、`assistant.delta`、`prompt.completed` 和 `error` 事件通过 `request_id` 标识请求；轮次事件还包含 `turn_id`。只返回对应请求的输出。客户端请求 ID 会在内部加入命名空间，避免认领其他客户端的轮次。
+
+输入只能是普通提示词文本，不支持斜杠命令、Shell 命令或媒体。工具审批仍显示在原生 TUI 中。`ready` 中出现新的会话 ID 表示用户已切换会话，客户端必须停止使用旧身份。断开后不会自动重放未完成的工作，最近 128 个请求内的重复请求 ID 会被拒绝。
 
 ## 典型用法
 

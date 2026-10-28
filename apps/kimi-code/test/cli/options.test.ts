@@ -625,3 +625,15 @@ describe('CLI options parsing', () => {
     });
   });
 });
+
+describe('--channel', () => {
+  it('captures the local socket path', () => {
+    expect(parse(['--channel', '/tmp/example.sock']).channel).toBe('/tmp/example.sock');
+  });
+
+  it('rejects print mode and empty paths', () => {
+    const opts = parse([]);
+    expect(() => validateOptions({ ...opts, prompt: 'hello', channel: '/tmp/example.sock' })).toThrow(OptionConflictError);
+    expect(() => validateOptions({ ...opts, channel: '  ' })).toThrow(OptionConflictError);
+  });
+});

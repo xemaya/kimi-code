@@ -47,6 +47,7 @@ export interface CLIOptions {
   agent: string | undefined;
   agentFiles: string[];
   addDirs?: string[];
+  channel?: string;
 }
 
 export interface ValidatedOptions {
@@ -113,6 +114,12 @@ export function validateOptions(
   }
   if (opts.yolo && opts.auto) {
     throw new OptionConflictError('Cannot combine --yolo with --auto.');
+  }
+  if (opts.channel !== undefined && opts.channel.trim().length === 0) {
+    throw new OptionConflictError('Channel path cannot be empty.');
+  }
+  if (promptMode && opts.channel !== undefined) {
+    throw new OptionConflictError('Cannot combine --prompt with --channel.');
   }
   // Validate `KIMI_MODEL_OUTPUT_FORMAT` eagerly in prompt mode so a typo fails
   // fast through the friendly `error:` path instead of mid-run.

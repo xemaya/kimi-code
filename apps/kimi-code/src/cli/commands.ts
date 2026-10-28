@@ -125,7 +125,8 @@ export function createProgram(
     )
     .addOption(new Option('--yes').hideHelp().default(false))
     .addOption(new Option('--auto-approve').hideHelp().default(false))
-    .option('--plan', 'Start in plan mode.', false);
+    .option('--plan', 'Start in plan mode.', false)
+    .option('--channel <path>', 'Experimental: expose this interactive Session over a local Unix socket.');
 
   registerExportCommand(program);
   registerForkCommand(program);
@@ -200,6 +201,7 @@ export function createProgram(
       agent: raw['agent'] as string | undefined,
       agentFiles: raw['agentFile'] as string[],
       addDirs: raw['addDir'] as string[],
+      channel: raw['channel'] as string | undefined,
     };
 
     onMain(opts);
